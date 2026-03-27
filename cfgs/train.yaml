@@ -1,0 +1,40 @@
+defaults:
+  - data_paths
+  - encoder_v: resnet18_v
+  - encoder_a: resnet18_a
+  - dataset: CREMAD
+  - optimizer: SGD
+  - methods: DMIL
+
+# General training settings
+n_classes: ${dataset.n_classes}
+batch_size: 64
+n_threads: 16
+lr: 4e-3
+test_checkpoint: ./
+n_epochs: 70
+train: True
+method_name: ${methods.method_name}
+embed_size: ${dataset.embed_size}
+random_seed: 2024
+val_freq: 1
+
+
+# Hardware settings
+device: cuda
+gpu_device: [0,1]
+
+# Output path settings
+tensorboard: True
+result_path: ./results/${dataset.name}/${method_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Pretrained model settings
+pretrained_path: ./pretrained/resnet18-f37072fd.pth
+
+# Hydra settings
+hydra:
+  run: 
+    dir: ${result_path}
+  sweep: 
+    dir: ${result_path}
+    subdir: ${hydra.job.num}

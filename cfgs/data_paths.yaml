@@ -1,0 +1,11 @@
+# @package _global_
+# Centralized dataset path configuration.
+# Update the paths below to point to your local CREMA-D dataset directory.
+
+cremad:
+  data_root: /path/to/CREMAD
+  train_list: train.csv
+  test_list: test.csv
+  visual_feature_path: /path/to/CREMAD
+  audio_feature_path: /path/to/CREMAD/AudioWAV
+  n_classes: 6

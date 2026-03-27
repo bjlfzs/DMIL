@@ -1,0 +1,16 @@
+# @package dataset
+_target_: datasets.cremad_dataset.CREMADDataset
+name: CREMAD
+n_classes: 6 # Number of classes for CREMAD
+
+# Data paths will be referenced from data_paths.yaml
+data_root: ${cremad.data_root}
+train_list: ${cremad.train_list}
+test_list: ${cremad.test_list}
+visual_feature_path: ${cremad.visual_feature_path} # Keep paths consistent with original logic
+audio_feature_path: ${cremad.audio_feature_path}
+embed_size: 32
+
+# Add other relevant parameters if needed, e.g., normalization flags
+# v_norm: True # Example if visual normalization is configurable
+# a_norm: False # Example if audio normalization is configurable 

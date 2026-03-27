@@ -1,0 +1,48 @@
+# @package methods
+method_name: DMIL
+lamb: 0.2
+
+# Three-stage training epoch counts
+# Stage 1: Unimodal VIB training (visual first, then audio)
+stage1_visual_epochs: 20   # Number of epochs for visual modality training
+stage1_audio_epochs: 20   # Number of epochs for audio modality training
+
+# Stage 2: Second-level decomposition and dynamic routing
+stage2_epochs: 5         # Number of Stage 2 training epochs (0 skips Stage 2 and Stage 3)
+
+# Learning rates (can be tuned per modality and stage)
+stage1_visual_lr: 4e-3     # Visual modality learning rate
+stage1_audio_lr: 4e-3      # Audio modality learning rate
+stage2_lr: 1e-3           # Stage 2 learning rate
+stage3_lr: 1e-5            # Stage 3 learning rate (joint fine-tuning, smaller LR)
+
+# Base loss weights
+beta_cls: 1.0        # Classification loss weight
+beta_modality: 0.8   # Per-modality classification loss weight
+
+# Stage 1 - Visual modality VIB loss weights
+stage1_visual_beta_kl: 0.4     # KL divergence loss
+stage1_visual_beta_rec: 0.1     # Reconstruction loss
+
+# Stage 1 - Audio modality VIB loss weights
+stage1_audio_beta_kl: 2.0      # KL divergence loss
+stage1_audio_beta_rec: 0.5     # Reconstruction loss
+
+# Stage 2 (second-level decomposition and dynamic routing) loss weights
+stage2_beta_red: 1.0          # Redundancy loss weight
+stage2_beta_inter: 1.0        # Cross-modal mutual information loss weight
+stage2_beta_uni: 1.0         # Uniqueness loss weight
+stage2_beta_rec_tr: 0.25       # z_tr reconstruction loss weight
+stage2_beta_all: 0.5          # Overall loss scale (kept for compatibility)
+
+# Stage 3 (joint fine-tuning of all parameters) loss weights
+# Stage 1 loss weights (first-level decomposition)
+stage3_beta_kl_stage1: 1.0  # First-level KL divergence weight (small, fine-tuning)
+stage3_beta_rec_stage1: 0.3   # First-level reconstruction weight (small, fine-tuning)
+stage3_beta_cls_stage1: 0.5   # First-level classification weight (small, fine-tuning)
+
+# Stage 2 loss weights (second-level decomposition)
+stage3_beta_red: 0.4       # Redundancy loss weight
+stage3_beta_inter: 0.4         # Cross-modal mutual information loss weight
+stage3_beta_uni: 0.4          # Uniqueness loss weight
+stage3_beta_rec_tr: 0.1       # z_tr reconstruction loss weight
