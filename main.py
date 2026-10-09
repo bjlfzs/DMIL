@@ -74,7 +74,7 @@ def main(cfg):
 
     if cfg.train:
         # Train model
-        train_results = train_model(cfg, model)
+        train_model(cfg, model)
         print("\nTraining and evaluation complete.")
 
 

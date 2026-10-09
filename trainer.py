@@ -8,8 +8,6 @@ Main components:
 """
 import time
 import torch
-import torch.nn as nn
-import os
 from utils import AverageMeter, calculate_accuracy, write_to_batch_logger, write_to_epoch_logger
 
 
@@ -202,7 +200,7 @@ class DecompositionTrainer(BaseTrainer):
         super().reset_metrics()
         self.losses_total = AverageMeter()
 
-    def compute_loss(self, outputs, labels, lamb=0.1, stage=1):
+    def compute_loss(self, outputs, labels, stage=1):
         """Compute the decomposition model loss for the given training stage."""
         if not isinstance(outputs, dict):
             return super().compute_loss(outputs, labels)
@@ -269,6 +267,7 @@ class DecompositionTrainer(BaseTrainer):
 
         # Loss weights from config
         beta_cls = self.opt.methods.beta_cls
+        lamb = self.opt.methods.lamb
 
         # Compose stage-specific total loss
         if stage == 1:
@@ -325,13 +324,6 @@ class DecompositionTrainer(BaseTrainer):
         self.losses_total.update(loss.detach().item(), labels.size(0))
 
         return loss
-
-    def on_epoch_end(self, epoch, tb_writer=None):
-        """End-of-epoch hook: log losses to TensorBoard."""
-        super().on_epoch_end(epoch, tb_writer)
-
-        if tb_writer is not None:
-            tb_writer.add_scalar('train/loss_total', self.losses_total.avg, epoch)
 
     def get_epoch_results(self):
         """Return a dict of training metrics for the completed epoch."""
@@ -391,7 +383,7 @@ class DecompositionTrainer(BaseTrainer):
 
             self.train_modality = train_modality if stage_num == 1 else 'both'
 
-            loss = self.compute_loss(outputs, labels, lamb=opt.methods.lamb, stage=stage_num)
+            loss = self.compute_loss(outputs, labels, stage=stage_num)
 
             loss.backward()
             optimizer.step()

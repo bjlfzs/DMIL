@@ -59,11 +59,10 @@ def diagonal_gaussian_kl(q_mean, q_log_var, p_mean=0.0, p_log_var=0.0):
 class VariationalBottleneck(nn.Module):
     """Variational Information Bottleneck layer."""
 
-    def __init__(self, lamb, input_size=512, embed_size=512):
+    def __init__(self, input_size=512, embed_size=512):
         super().__init__()
         self.embed_size = embed_size
         self.fc = nn.Linear(input_size, embed_size * 2)
-        self.lamb = lamb
 
     def forward(self, inputs):
         z = self.fc(inputs)
@@ -102,22 +101,19 @@ class DMILModel(nn.Module):
 
         self.embed_v = nn.Linear(input_size, embed_size)
         self.embed_a = nn.Linear(input_size, embed_size)
-        self.clf_audio_fc = nn.Linear(embed_size, num_class)
-        self.clf_visual_fc = nn.Linear(embed_size, num_class)
-        self.clf_joint_fc = nn.Linear(2 * embed_size, num_class)
 
         # First-level decomposition: task-relevant (z_tr) and task-irrelevant (z_ir)
-        self.IB_m1_tr = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
-        self.IB_m1_ir = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
-        self.IB_m2_tr = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
-        self.IB_m2_ir = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
+        self.IB_m1_tr = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
+        self.IB_m1_ir = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
+        self.IB_m2_tr = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
+        self.IB_m2_ir = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
 
         # Second-level decomposition: redundancy, uniqueness, synergy
-        self.IB_redundancy = VariationalBottleneck(lamb=0.1, input_size=embed_size * 2, embed_size=embed_size)
-        self.IB_m1_r = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
-        self.IB_m2_r = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
-        self.IB_m1_unique = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
-        self.IB_m2_unique = VariationalBottleneck(lamb=0.1, input_size=embed_size, embed_size=embed_size)
+        self.IB_redundancy = VariationalBottleneck(input_size=embed_size * 2, embed_size=embed_size)
+        self.IB_m1_r = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
+        self.IB_m2_r = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
+        self.IB_m1_unique = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
+        self.IB_m2_unique = VariationalBottleneck(input_size=embed_size, embed_size=embed_size)
 
         self.cross_modality = CrossModality(embed_size)
 
@@ -177,23 +173,27 @@ class DMILModel(nn.Module):
             if not stage1_trainable:
                 module.eval()
 
-    def get_loss(self, z_mean, z_log_var, r_mean, r_log_var, lamb=0.1):
-        """KL divergence between N(z_mean, exp(z_log_var)) and N(r_mean, exp(r_log_var)), with reparameterization."""
+    def get_loss(self, z_mean, z_log_var, r_mean, r_log_var):
+        """Sample from z and return its unweighted KL divergence to r.
+
+        Loss weighting intentionally lives only in ``DecompositionTrainer`` so
+        that ``cfg.methods.lamb`` is the single source of truth.
+        """
         kl_loss = diagonal_gaussian_kl(
             z_mean, z_log_var, r_mean, r_log_var
         )
         kl_loss = _b(kl_loss)
         if self.training:
             u = torch.randn_like(z_mean)
-            return z_mean + torch.exp(z_log_var / 2) * u, lamb * kl_loss
-        return z_mean, lamb * kl_loss
+            return z_mean + torch.exp(z_log_var / 2) * u, kl_loss
+        return z_mean, kl_loss
 
     def _stage1_vib(self, feat, IB_tr, IB_ir, recon_net, clf_fc):
         """Stage 1 VIB for one modality: sample z_tr and z_ir, reconstruct input, classify z_tr."""
         z_tr_mu, z_tr_logvar = IB_tr(feat)
         z_ir_mu, z_ir_logvar = IB_ir(feat)
-        z_tr, loss_kl_tr = self.get_loss(z_tr_mu, z_tr_logvar, 0.0, 0.0, lamb=0.1)
-        z_ir, loss_kl_ir = self.get_loss(z_ir_mu, z_ir_logvar, 0.0, 0.0, lamb=0.1)
+        z_tr, loss_kl_tr = self.get_loss(z_tr_mu, z_tr_logvar, 0.0, 0.0)
+        z_ir, loss_kl_ir = self.get_loss(z_ir_mu, z_ir_logvar, 0.0, 0.0)
         rec = recon_net(torch.cat((z_tr, z_ir), dim=1))
         return clf_fc(z_tr), loss_kl_tr + loss_kl_ir, _recon_loss(feat, rec)
 
@@ -317,14 +317,12 @@ class DMILModel(nn.Module):
     def train_stage_2_decomposition_routing(self, v, a):
         """Stage 2: Frozen Stage-1 features → second-level decomposition + dynamic gating."""
         with torch.no_grad():
-            z_tr_1_mu, z_tr_1_logvar = self.IB_m1_tr(v)
-            z_tr_2_mu, z_tr_2_logvar = self.IB_m2_tr(a)
+            z_tr_1_mu, _ = self.IB_m1_tr(v)
+            z_tr_2_mu, _ = self.IB_m2_tr(a)
             z_ir_1_mu, z_ir_1_logvar = self.IB_m1_ir(v)
             z_ir_2_mu, z_ir_2_logvar = self.IB_m2_ir(a)
-            z_tr_1, _ = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0.0, 0.0, lamb=0.1)
-            z_tr_2, _ = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0.0, 0.0, lamb=0.1)
-            z_ir_1, _ = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0.0, 0.0, lamb=0.1)
-            z_ir_2, _ = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0.0, 0.0, lamb=0.1)
+            z_ir_1, _ = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0.0, 0.0)
+            z_ir_2, _ = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0.0, 0.0)
 
         outputs = self._second_level_decompose(z_tr_1_mu, z_tr_2_mu, z_ir_1, z_ir_2)
         outputs["v_out"] = self.tr1_fc(z_tr_1_mu)
@@ -338,10 +336,10 @@ class DMILModel(nn.Module):
         z_ir_1_mu, z_ir_1_logvar = self.IB_m1_ir(v)
         z_ir_2_mu, z_ir_2_logvar = self.IB_m2_ir(a)
 
-        z_tr_1, loss_tr_1 = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0.0, 0.0, lamb=0.1)
-        z_tr_2, loss_tr_2 = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0.0, 0.0, lamb=0.1)
-        z_ir_1, loss_ir_1 = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0.0, 0.0, lamb=0.1)
-        z_ir_2, loss_ir_2 = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0.0, 0.0, lamb=0.1)
+        z_tr_1, loss_tr_1 = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0.0, 0.0)
+        z_tr_2, loss_tr_2 = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0.0, 0.0)
+        z_ir_1, loss_ir_1 = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0.0, 0.0)
+        z_ir_2, loss_ir_2 = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0.0, 0.0)
 
         rec_1 = self.recon_1(torch.cat((z_tr_1, z_ir_1), dim=1))
         rec_2 = self.recon_2(torch.cat((z_tr_2, z_ir_2), dim=1))

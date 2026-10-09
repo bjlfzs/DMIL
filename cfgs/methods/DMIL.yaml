@@ -1,6 +1,10 @@
 # @package methods
 method_name: DMIL
-lamb: 0.2
+# The legacy implementation applied 0.1 inside every KL and 0.2 here.
+# KLs are now unscaled at the model level, so 0.02 preserves their effective
+# coefficient. Reconstruction betas below are multiplied by 10 to preserve
+# their previous effective coefficients as well.
+lamb: 0.02
 
 # Three-stage training epoch counts
 # Stage 1: Joint intra-modality decomposition for both modalities.
@@ -20,27 +24,26 @@ beta_cls: 1.0        # Classification loss weight
 
 # Stage 1 - Visual modality VIB loss weights
 stage1_visual_beta_kl: 0.4     # KL divergence loss
-stage1_visual_beta_rec: 0.1     # Reconstruction loss
+stage1_visual_beta_rec: 1.0     # Legacy-equivalent reconstruction weight
 
 # Stage 1 - Audio modality VIB loss weights
 stage1_audio_beta_kl: 2.0      # KL divergence loss
-stage1_audio_beta_rec: 0.5     # Reconstruction loss
+stage1_audio_beta_rec: 5.0     # Legacy-equivalent reconstruction weight
 
 # Stage 2 (second-level decomposition and dynamic routing) loss weights
 stage2_beta_red: 1.0          # Redundancy loss weight
 stage2_beta_inter: 1.0        # Joint-R to single-modality-R alignment weight
 stage2_beta_uni: 1.0          # U compactness KL weight for R/U decomposition
-stage2_beta_rec_tr: 0.25      # Reconstruct M from (R, U) decomposition
-stage2_beta_all: 0.5          # Overall loss scale (kept for compatibility)
+stage2_beta_rec_tr: 2.5       # Legacy-equivalent M reconstruction weight
 
 # Stage 3 (joint fine-tuning of all parameters) loss weights
 # Stage 1 loss weights (first-level decomposition)
 stage3_beta_kl_stage1: 1.0  # First-level KL divergence weight (small, fine-tuning)
-stage3_beta_rec_stage1: 0.3   # First-level reconstruction weight (small, fine-tuning)
+stage3_beta_rec_stage1: 3.0   # Legacy-equivalent Stage-1 reconstruction weight
 stage3_beta_cls_stage1: 0.5   # First-level classification weight (small, fine-tuning)
 
 # Stage 2 loss weights (second-level decomposition)
 stage3_beta_red: 0.4       # Redundancy loss weight
 stage3_beta_inter: 0.4         # Cross-modal mutual information loss weight
 stage3_beta_uni: 0.4          # Uniqueness loss weight
-stage3_beta_rec_tr: 0.1       # z_tr reconstruction loss weight
+stage3_beta_rec_tr: 1.0       # Legacy-equivalent M reconstruction weight

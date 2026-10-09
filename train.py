@@ -1,5 +1,4 @@
 import os
-import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -122,9 +121,6 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
     Stage 3: Joint fine-tuning of all parameters end-to-end.
     """
     model = trainer.model
-    optimizer = trainer.optimizer
-    scheduler = trainer.scheduler
-
     # Track the best checkpoint for each paper-defined training stage.
     best_acc = {1: float('-inf'), 2: float('-inf'), 3: float('-inf')}
     dataset_name = cfg.dataset.name
@@ -224,7 +220,7 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
 
         print(f"CURRENT STAGE: {stage}")
 
-        train_results = trainer.train_decomp(
+        trainer.train_decomp(
             epoch=epoch,
             data_loader=train_loader,
             model=model,

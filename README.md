@@ -34,9 +34,12 @@ Then set your paths in `cfgs/data_paths.yaml`:
 ```yaml
 cremad:
   data_root: /path/to/CREMAD
-  visual_feature_path: /path/to/CREMAD/Image-05-FPS
+  visual_feature_path: /path/to/CREMAD
   audio_feature_path: /path/to/CREMAD/AudioWAV
 ```
+
+`visual_feature_path` must point to the CREMA-D root directory. The dataset
+loader appends `Image-05-FPS/<file_id>` when resolving each visual sample.
 
 ## Quick Start
 
