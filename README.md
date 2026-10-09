@@ -2,7 +2,7 @@
 
 Official implementation of Information-Theoretic Decomposition for Multimodal Interaction Learning (DMIL) (CVPR 2026).
 
-> Paper: [CVPR 2026 — link TBD] | arXiv: [link TBD]
+> Paper: [CVPR 2026 Open Access (PDF)](https://openaccess.thecvf.com/content/CVPR2026/papers/Yang_Information-Theoretic_Decomposition_for_Multimodal_Interaction_Learning_CVPR_2026_paper.pdf) | [arXiv:2606.11614 (PDF)](https://arxiv.org/pdf/2606.11614)
 
 ## Method
 
@@ -44,6 +44,11 @@ cremad:
 ```bash
 python main.py dataset=CREMAD methods=DMIL
 ```
+
+The default schedule follows the paper: 10 epochs of joint intra-modality
+decomposition, 5 epochs of consistency decomposition with the Stage-1 modules
+frozen, and joint fine-tuning for the remaining epochs. Set
+`methods.stage2_epochs=0` to run Stage 1 only.
 
 ## Citation
 

@@ -8,6 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils import Logger, save_checkpoint, worker_init_fn
 from trainer import TrainerFactory
+from training_schedule import phase_for_epoch, validate_schedule
 
 
 def get_dataset(cfg):
@@ -116,7 +117,7 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
                               train_logger, val_logger, test_logger, train_batch_logger, tb_writer):
     """
     DMIL 3-stage training pipeline.
-    Stage 1: Intra-modality VIB training (z_tr, z_ir) — visual first, then audio.
+    Stage 1: Joint intra-modality VIB training for both modalities.
     Stage 2: Second-level decomposition (redundancy, unique, synergy) and dynamic gating.
     Stage 3: Joint fine-tuning of all parameters end-to-end.
     """
@@ -124,26 +125,24 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
     optimizer = trainer.optimizer
     scheduler = trainer.scheduler
 
-    # Track best accuracy and checkpoint path for each stage / modality
-    best_acc = {'visual': 0, 'audio': 0, 2: 0, 3: 0}
+    # Track the best checkpoint for each paper-defined training stage.
+    best_acc = {1: float('-inf'), 2: float('-inf'), 3: float('-inf')}
     dataset_name = cfg.dataset.name
     best_model_paths = {
-        'visual': os.path.join("best_stage_1", f'{dataset_name}_visual_best.pth'),
-        'audio': os.path.join("best_stage_1", f'{dataset_name}_audio_best.pth'),
-        2: os.path.join("best_stage_2", f'{dataset_name}_best.pth'),
+        1: None,
+        2: None,
         3: None
     }
 
     # Stage transition epoch counts
-    stage1_visual_epochs = cfg.methods.stage1_visual_epochs
-    stage1_audio_epochs = cfg.methods.stage1_audio_epochs
-    stage1to2 = stage1_visual_epochs + stage1_audio_epochs + 1
+    stage1_epochs = cfg.methods.stage1_epochs
     stage2_epochs = cfg.methods.stage2_epochs
-    stage2to3 = stage1to2 + stage2_epochs if stage2_epochs >= 0 else None
+    validate_schedule(stage1_epochs, stage2_epochs, cfg.n_epochs)
+    stage1to2 = stage1_epochs + 1
+    stage2to3 = stage1_epochs + stage2_epochs + 1
 
     # Learning-rate settings per stage
-    stage1_visual_lr = cfg.methods.stage1_visual_lr
-    stage1_audio_lr = cfg.methods.stage1_audio_lr
+    stage1_lr = cfg.methods.stage1_lr
     stage2_lr = cfg.methods.stage2_lr
     stage3_lr = cfg.methods.stage3_lr
 
@@ -152,78 +151,44 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
 
     parameters = [p for p in model.parameters()]
 
-    # Start in Stage 1 with visual modality
+    # The paper's L1 objective sums both modalities in Stage 1.
     stage = 1
-    train_modality = 'visual'
-    if hasattr(model, 'module'):
-        model.module.stage = 1
-    else:
-        model.stage = 1
+    train_modality = 'both'
+    model_core = model.module if hasattr(model, 'module') else model
+    model_core.configure_stage(1)
 
-    # Initialize optimizer with the visual-modality learning rate
+    # Initialize the joint Stage-1 optimizer.
     optimizer = hydra.utils.instantiate(cfg.optimizer, params=parameters)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = stage1_visual_lr
+        param_group['lr'] = stage1_lr
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.2, patience=2, verbose=True)
-    print(f"Stage 1 Visual learning rate: {stage1_visual_lr}")
+    print(f"Stage 1 learning rate: {stage1_lr}")
 
     print("\n" + "=" * 80)
-    print("Stage 1 - Part 1: Training Visual Modality VIB")
+    print("Stage 1: Training Both Intra-Modality Decompositions")
     print("=" * 80)
-    if stage2_epochs == 0:
-        stage = 2
 
     for epoch in range(1, n_epochs + 1):
+        scheduled_stage = phase_for_epoch(epoch, stage1_epochs, stage2_epochs)
+        if scheduled_stage is None:
+            print("Stage 2 is disabled; stopping after Stage 1 as configured.")
+            break
+
         # Stage transition logic
-        if epoch == stage1_visual_epochs:
-            print("\n" + "=" * 80)
-            print("Stage 1 - Part 1 Complete: Switching to Audio Modality Training...")
-            print("=" * 80)
-            train_modality = 'audio'
-
-            optimizer = hydra.utils.instantiate(cfg.optimizer, params=parameters)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = stage1_audio_lr
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=1, verbose=True)
-            print(f"Stage 1 Audio learning rate: {stage1_audio_lr}")
-
-        elif stage1to2 is not None and epoch == stage1to2 and stage == 1:
+        if epoch == stage1to2 and stage == 1:
             print("\n" + "=" * 80)
             print("SWITCHING FROM STAGE 1 TO STAGE 2")
             print("=" * 80)
 
-            # Load Stage-1 visual checkpoint
-            if best_model_paths['visual'] and os.path.exists(best_model_paths['visual']):
-                print(f"Loading visual modality model: {best_model_paths['visual']}")
-                checkpoint_visual = torch.load(best_model_paths['visual'], map_location='cuda')
-                model_state = model.state_dict() if not hasattr(model, 'module') else model.module.state_dict()
-                for key in checkpoint_visual['state_dict'].keys():
-                    if 'visual' in key or 'IB_m1' in key or 'recon_1' in key or 'tr1_fc' in key or 'embed_v' in key:
-                        model_state[key] = checkpoint_visual['state_dict'][key]
-                if hasattr(model, 'module'):
-                    model.module.load_state_dict(model_state, strict=False)
-                else:
-                    model.load_state_dict(model_state, strict=False)
-
-            # Load Stage-1 audio checkpoint
-            if best_model_paths['audio'] and os.path.exists(best_model_paths['audio']):
-                print(f"Loading audio modality model: {best_model_paths['audio']}")
-                checkpoint_audio = torch.load(best_model_paths['audio'], map_location='cuda')
-                model_state = model.state_dict() if not hasattr(model, 'module') else model.module.state_dict()
-                for key in checkpoint_audio['state_dict'].keys():
-                    if 'audio' in key or 'IB_m2' in key or 'recon_2' in key or 'tr2_fc' in key or 'embed_a' in key:
-                        model_state[key] = checkpoint_audio['state_dict'][key]
-                if hasattr(model, 'module'):
-                    model.module.load_state_dict(model_state, strict=False)
-                else:
-                    model.load_state_dict(model_state, strict=False)
+            # Stage 1 now has one jointly trained checkpoint for both modalities.
+            if best_model_paths[1] and os.path.exists(best_model_paths[1]):
+                print(f"Loading Stage 1 model: {best_model_paths[1]}")
+                checkpoint_stage1 = torch.load(best_model_paths[1], map_location=cfg.device)
+                model_core.load_state_dict(checkpoint_stage1['state_dict'], strict=False)
 
             stage = 2
             train_modality = 'both'
-            if hasattr(model, 'module'):
-                model.module.stage = 2
-            else:
-                model.stage = 2
+            model_core.configure_stage(2)
 
             optimizer = hydra.utils.instantiate(cfg.optimizer, params=parameters)
             for param_group in optimizer.param_groups:
@@ -231,31 +196,31 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=1, verbose=True)
             print(f"Stage 2 learning rate: {stage2_lr}")
 
-        elif stage2to3 is not None and epoch == stage2to3 and stage == 2:
+        elif epoch == stage2to3 and stage == 2:
             print("\n" + "=" * 80)
             print("SWITCHING FROM STAGE 2 TO STAGE 3")
             print("=" * 80)
 
             if best_model_paths[2] and os.path.exists(best_model_paths[2]):
-                checkpoint_stage2 = torch.load(best_model_paths[2], map_location='cuda')
-                if hasattr(model, 'module'):
-                    model.module.load_state_dict(checkpoint_stage2['state_dict'], strict=False)
-                else:
-                    model.load_state_dict(checkpoint_stage2['state_dict'], strict=False)
+                checkpoint_stage2 = torch.load(best_model_paths[2], map_location=cfg.device)
+                model_core.load_state_dict(checkpoint_stage2['state_dict'], strict=False)
                 print("Best Stage 2 model loaded successfully!")
 
             stage = 3
             train_modality = 'both'
-            if hasattr(model, 'module'):
-                model.module.stage = 3
-            else:
-                model.stage = 3
+            model_core.configure_stage(3)
 
             optimizer = hydra.utils.instantiate(cfg.optimizer, params=parameters)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = stage3_lr
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=10, verbose=True)
             print(f"Stage 3 learning rate: {stage3_lr}")
+
+        if stage != scheduled_stage:
+            raise RuntimeError(
+                f"Training schedule mismatch at epoch {epoch}: "
+                f"expected Stage {scheduled_stage}, got Stage {stage}"
+            )
 
         print(f"CURRENT STAGE: {stage}")
 
@@ -281,16 +246,15 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
 
             # Save the best checkpoint for the current stage / modality
             if stage == 1:
-                save_key = train_modality
-                if val_acc is not None and val_acc > best_acc[save_key]:
-                    if best_model_paths[save_key] and os.path.exists(best_model_paths[save_key]):
-                        os.remove(best_model_paths[save_key])
-                    best_acc[save_key] = val_acc
-                    best_model_paths[save_key] = os.path.join(
-                        cfg.result_path, f'stage1_{train_modality}_best_epoch_{epoch}_acc_{val_acc:.3f}.pth'
+                if val_acc is not None and val_acc > best_acc[1]:
+                    if best_model_paths[1] and os.path.exists(best_model_paths[1]):
+                        os.remove(best_model_paths[1])
+                    best_acc[1] = val_acc
+                    best_model_paths[1] = os.path.join(
+                        cfg.result_path, f'stage1_best_epoch_{epoch}_acc_{val_acc:.3f}.pth'
                     )
-                    save_checkpoint(best_model_paths[save_key], epoch, model, optimizer, scheduler)
-                    print(f'Stage 1 ({train_modality}) best model saved with accuracy: {best_acc[save_key]:.3f}')
+                    save_checkpoint(best_model_paths[1], epoch, model, optimizer, scheduler)
+                    print(f'Stage 1 best model saved with accuracy: {best_acc[1]:.3f}')
             elif stage == 2 or stage == 3:
                 if val_acc is not None and val_acc > best_acc[stage]:
                     if best_model_paths[stage] and os.path.exists(best_model_paths[stage]):
@@ -306,4 +270,8 @@ def train_decomposition_model(cfg, trainer, train_loader, val_loader, test_loade
             if val_loss is not None:
                 scheduler.step(val_loss)
 
-    return {'best_model_path': best_model_paths[3] or best_model_paths[2]}
+    return {
+        'best_model_path': (
+            best_model_paths[3] or best_model_paths[2] or best_model_paths[1]
+        )
+    }

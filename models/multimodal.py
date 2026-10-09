@@ -37,6 +37,25 @@ def _recon_loss(x, x_hat):
     return _b(torch.norm(x - x_hat) ** 2 / (x.size(0) * x.size(1)))
 
 
+def diagonal_gaussian_kl(q_mean, q_log_var, p_mean=0.0, p_log_var=0.0):
+    """Mean KL divergence ``KL(q || p)`` for diagonal Gaussians.
+
+    ``q_log_var`` and ``p_log_var`` are logarithms of variances, not standard
+    deviations. Scalar prior parameters are broadcast by PyTorch, so the
+    standard-normal prior is represented by ``p_mean=0`` and ``p_log_var=0``.
+    """
+    p_mean = torch.as_tensor(p_mean, dtype=q_mean.dtype, device=q_mean.device)
+    p_log_var = torch.as_tensor(
+        p_log_var, dtype=q_log_var.dtype, device=q_log_var.device
+    )
+    log_var_delta = q_log_var - p_log_var
+    variance_ratio = torch.exp(log_var_delta)
+    squared_mean_delta = (q_mean - p_mean).pow(2) * torch.exp(-p_log_var)
+    return 0.5 * torch.mean(
+        -log_var_delta + variance_ratio + squared_mean_delta - 1
+    )
+
+
 class VariationalBottleneck(nn.Module):
     """Variational Information Bottleneck layer."""
 
@@ -134,11 +153,35 @@ class DMILModel(nn.Module):
 
         print(f"Using {method.method_name} Fusion with Two-Stage Decomposition and Gating Mechanism!!")
 
+    def configure_stage(self, stage):
+        """Select a training stage and apply the freezing required by the paper.
+
+        Stage 2 keeps the encoders and intra-modality decomposition fixed while
+        the consistency decomposition and synergy modules are learned. Setting
+        those modules to evaluation mode also freezes BatchNorm running stats,
+        which ``torch.no_grad`` alone does not do.
+        """
+        if stage not in (1, 2, 3):
+            raise ValueError(f'Stage {stage} not defined. Only 1, 2, 3 are supported.')
+
+        self.stage = stage
+        stage1_modules = (
+            self.visual_net, self.audio_net, self.embed_v, self.embed_a,
+            self.IB_m1_tr, self.IB_m1_ir, self.IB_m2_tr, self.IB_m2_ir,
+            self.recon_1, self.recon_2, self.tr1_fc, self.tr2_fc,
+        )
+        stage1_trainable = stage != 2
+        for module in stage1_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad_(stage1_trainable)
+            if not stage1_trainable:
+                module.eval()
+
     def get_loss(self, z_mean, z_log_var, r_mean, r_log_var, lamb=0.1):
         """KL divergence between N(z_mean, exp(z_log_var)) and N(r_mean, exp(r_log_var)), with reparameterization."""
-        kl_loss = -0.5 * torch.mean(torch.mean(
-            1 + (z_log_var - r_log_var) - (z_mean - r_mean).pow(2) - (z_log_var - r_log_var).exp(),
-            dim=0))
+        kl_loss = diagonal_gaussian_kl(
+            z_mean, z_log_var, r_mean, r_log_var
+        )
         kl_loss = _b(kl_loss)
         if self.training:
             u = torch.randn_like(z_mean)
@@ -149,8 +192,8 @@ class DMILModel(nn.Module):
         """Stage 1 VIB for one modality: sample z_tr and z_ir, reconstruct input, classify z_tr."""
         z_tr_mu, z_tr_logvar = IB_tr(feat)
         z_ir_mu, z_ir_logvar = IB_ir(feat)
-        z_tr, loss_kl_tr = self.get_loss(z_tr_mu, z_tr_logvar, 0, 1, lamb=0.1)
-        z_ir, loss_kl_ir = self.get_loss(z_ir_mu, z_ir_logvar, 0, 1, lamb=0.1)
+        z_tr, loss_kl_tr = self.get_loss(z_tr_mu, z_tr_logvar, 0.0, 0.0, lamb=0.1)
+        z_ir, loss_kl_ir = self.get_loss(z_ir_mu, z_ir_logvar, 0.0, 0.0, lamb=0.1)
         rec = recon_net(torch.cat((z_tr, z_ir), dim=1))
         return clf_fc(z_tr), loss_kl_tr + loss_kl_ir, _recon_loss(feat, rec)
 
@@ -161,15 +204,19 @@ class DMILModel(nn.Module):
         """
         # Redundancy
         z_red_mu, z_red_logvar = self.IB_redundancy(torch.cat((z_tr_1_mu, z_tr_2_mu), dim=1))
-        z_red, loss_red_ib = self.get_loss(z_red_mu, z_red_logvar, 0, 1)
+        z_red, loss_red_ib = self.get_loss(z_red_mu, z_red_logvar, 0.0, 0.0)
 
         # Uniqueness
         z_unique_1_mu, z_unique_1_logvar = self.IB_m1_unique(z_tr_1_mu)
         z_unique_2_mu, z_unique_2_logvar = self.IB_m2_unique(z_tr_2_mu)
-        z_unique_1, loss_uni_1 = self.get_loss(z_unique_1_mu, z_unique_1_logvar, 0, 1)
-        z_unique_2, loss_uni_2 = self.get_loss(z_unique_2_mu, z_unique_2_logvar, 0, 1)
+        # Compactness terms from Appendix A.3: KL(q(U^m|M^m) || N(0, I)).
+        # Together with reconstruction from (R, U^m), these terms implement
+        # the variational R/U decomposition rather than a standalone U loss.
+        z_unique_1, loss_uni_1 = self.get_loss(z_unique_1_mu, z_unique_1_logvar, 0.0, 0.0)
+        z_unique_2, loss_uni_2 = self.get_loss(z_unique_2_mu, z_unique_2_logvar, 0.0, 0.0)
 
-        # Cross-modal mutual information (inter-modality)
+        # Appendix A.3 alignment/conditional-MI upper bound. The joint
+        # q(R|M1,M2) is aligned with each single-modality v_phi(R|M^m).
         z_red_1_mu, z_red_1_logvar = self.IB_m1_r(z_tr_1_mu)
         z_red_2_mu, z_red_2_logvar = self.IB_m2_r(z_tr_2_mu)
         _, loss_inter_1 = self.get_loss(z_red_mu, z_red_logvar, z_red_1_mu, z_red_1_logvar)
@@ -207,12 +254,14 @@ class DMILModel(nn.Module):
             "gate_weights": gate_weights,
         }
 
-    def forward(self, visual, audio, train_modality='visual'):
+    def forward(self, visual, audio, train_modality='both'):
         """
         Args:
             visual: Visual input tensor.
             audio: Audio input tensor.
-            train_modality: 'visual' or 'audio' for Stage 1; ignored for Stage 2/3.
+            train_modality: Defaults to both modalities, as required by the
+                paper's Stage-1 objective. Single-modality values are retained
+                for backwards compatibility; Stage 2/3 ignore this argument.
         """
         batch_size = visual.size(0)
         v = self.visual_net(visual)
@@ -222,16 +271,30 @@ class DMILModel(nn.Module):
         a = self.embed_a(a)
 
         if self.stage == 1:
-            return self.train_stage_1_single_vib(v, a, train_modality)
+            return self.train_stage_1_vib(v, a, train_modality)
         elif self.stage == 2:
             return self.train_stage_2_decomposition_routing(v, a)
         elif self.stage == 3:
             return self.train_stage_3_joint_finetune(v, a)
         raise ValueError(f'Stage {self.stage} not defined. Only 1, 2, 3 are supported.')
 
-    def train_stage_1_single_vib(self, v, a, train_modality='visual'):
-        """Stage 1: Single-modality VIB training (z_tr, z_ir)."""
+    def train_stage_1_vib(self, v, a, train_modality='both'):
+        """Stage 1: learn both modalities' intra-modality decompositions."""
         zero = v.new_zeros(1)
+        if train_modality == 'both':
+            v_out, loss_kl_v, loss_rec_v = self._stage1_vib(
+                v, self.IB_m1_tr, self.IB_m1_ir, self.recon_1, self.tr1_fc
+            )
+            a_out, loss_kl_a, loss_rec_a = self._stage1_vib(
+                a, self.IB_m2_tr, self.IB_m2_ir, self.recon_2, self.tr2_fc
+            )
+            return {
+                "v_out": v_out,
+                "a_out": a_out,
+                "out": (v_out + a_out) / 2,
+                "loss_IB": (loss_kl_v, loss_kl_a),
+                "loss_rec_input": (loss_rec_v, loss_rec_a),
+            }
         if train_modality == 'visual':
             out, loss_kl, loss_rec = self._stage1_vib(v, self.IB_m1_tr, self.IB_m1_ir, self.recon_1, self.tr1_fc)
             return {
@@ -246,7 +309,10 @@ class DMILModel(nn.Module):
                 "loss_IB": (zero, loss_kl),
                 "loss_rec_input": (zero, loss_rec),
             }
-        raise ValueError(f'Invalid train_modality: {train_modality}')
+        raise ValueError(
+            f"Invalid train_modality: {train_modality}. "
+            "Expected 'both', 'visual', or 'audio'."
+        )
 
     def train_stage_2_decomposition_routing(self, v, a):
         """Stage 2: Frozen Stage-1 features → second-level decomposition + dynamic gating."""
@@ -255,10 +321,10 @@ class DMILModel(nn.Module):
             z_tr_2_mu, z_tr_2_logvar = self.IB_m2_tr(a)
             z_ir_1_mu, z_ir_1_logvar = self.IB_m1_ir(v)
             z_ir_2_mu, z_ir_2_logvar = self.IB_m2_ir(a)
-            z_tr_1, _ = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0, 1, lamb=0.1)
-            z_tr_2, _ = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0, 1, lamb=0.1)
-            z_ir_1, _ = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0, 1, lamb=0.1)
-            z_ir_2, _ = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0, 1, lamb=0.1)
+            z_tr_1, _ = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0.0, 0.0, lamb=0.1)
+            z_tr_2, _ = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0.0, 0.0, lamb=0.1)
+            z_ir_1, _ = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0.0, 0.0, lamb=0.1)
+            z_ir_2, _ = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0.0, 0.0, lamb=0.1)
 
         outputs = self._second_level_decompose(z_tr_1_mu, z_tr_2_mu, z_ir_1, z_ir_2)
         outputs["v_out"] = self.tr1_fc(z_tr_1_mu)
@@ -272,10 +338,10 @@ class DMILModel(nn.Module):
         z_ir_1_mu, z_ir_1_logvar = self.IB_m1_ir(v)
         z_ir_2_mu, z_ir_2_logvar = self.IB_m2_ir(a)
 
-        z_tr_1, loss_tr_1 = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0, 1, lamb=0.1)
-        z_tr_2, loss_tr_2 = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0, 1, lamb=0.1)
-        z_ir_1, loss_ir_1 = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0, 1, lamb=0.1)
-        z_ir_2, loss_ir_2 = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0, 1, lamb=0.1)
+        z_tr_1, loss_tr_1 = self.get_loss(z_tr_1_mu, z_tr_1_logvar, 0.0, 0.0, lamb=0.1)
+        z_tr_2, loss_tr_2 = self.get_loss(z_tr_2_mu, z_tr_2_logvar, 0.0, 0.0, lamb=0.1)
+        z_ir_1, loss_ir_1 = self.get_loss(z_ir_1_mu, z_ir_1_logvar, 0.0, 0.0, lamb=0.1)
+        z_ir_2, loss_ir_2 = self.get_loss(z_ir_2_mu, z_ir_2_logvar, 0.0, 0.0, lamb=0.1)
 
         rec_1 = self.recon_1(torch.cat((z_tr_1, z_ir_1), dim=1))
         rec_2 = self.recon_2(torch.cat((z_tr_2, z_ir_2), dim=1))

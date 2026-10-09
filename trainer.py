@@ -214,6 +214,7 @@ class DecompositionTrainer(BaseTrainer):
         loss_cls = self.criterion(out, labels)
         loss_v = self.criterion(v_out, labels) if v_out is not None else 0
         loss_a = self.criterion(a_out, labels) if a_out is not None else 0
+        self.losses_cls.update(loss_cls.detach().item(), labels.size(0))
 
         # KL divergence loss (VIB)
         if "loss_IB" in outputs and isinstance(outputs["loss_IB"], tuple):
@@ -231,7 +232,7 @@ class DecompositionTrainer(BaseTrainer):
         else:
             loss_rec_input_v = loss_rec_input_a = loss_rec_input = torch.tensor(0.0, device=out.device)
 
-        # z_tr reconstruction loss
+        # Appendix A.3 reconstruction: recover each M^m from (R, U^m).
         if "loss_rec_tr" in outputs and isinstance(outputs["loss_rec_tr"], tuple):
             loss_rec_tr_v = torch.sum(outputs["loss_rec_tr"][0])
             loss_rec_tr_a = torch.sum(outputs["loss_rec_tr"][1])
@@ -239,7 +240,8 @@ class DecompositionTrainer(BaseTrainer):
         else:
             loss_rec_tr_v = loss_rec_tr_a = loss_rec_tr = torch.tensor(0.0, device=out.device)
 
-        # Cross-modal mutual information loss
+        # Alignment/conditional-MI upper bound between joint R and each
+        # single-modality variational approximation v_phi(R|M^m).
         if "loss_inter" in outputs and isinstance(outputs["loss_inter"], tuple):
             loss_inter_v = torch.sum(outputs["loss_inter"][0])
             loss_inter_a = torch.sum(outputs["loss_inter"][1])
@@ -247,7 +249,8 @@ class DecompositionTrainer(BaseTrainer):
         else:
             loss_inter_v = loss_inter_a = loss_inter = torch.tensor(0.0, device=out.device)
 
-        # Uniqueness loss
+        # U compactness: KL(q(U^m|M^m) || N(0, I)). Together with the
+        # reconstruction term above this forms the variational R/U split.
         if "loss_uni" in outputs and isinstance(outputs["loss_uni"], tuple):
             loss_uni_v = torch.sum(outputs["loss_uni"][0])
             loss_uni_a = torch.sum(outputs["loss_uni"][1])
@@ -266,21 +269,24 @@ class DecompositionTrainer(BaseTrainer):
 
         # Loss weights from config
         beta_cls = self.opt.methods.beta_cls
-        beta_modality = self.opt.methods.beta_modality
 
         # Compose stage-specific total loss
         if stage == 1:
-            train_modality = self.train_modality
-            if train_modality == 'visual':
-                beta_kl = self.opt.methods.stage1_visual_beta_kl
-                beta_rec = self.opt.methods.stage1_visual_beta_rec
-            else:
-                beta_kl = self.opt.methods.stage1_audio_beta_kl
-                beta_rec = self.opt.methods.stage1_audio_beta_rec
-
-            loss = (beta_cls * loss_cls +
-                    beta_modality * (loss_v + loss_a) +
-                    lamb * (beta_kl * loss_kl + 0.1 * beta_rec * loss_rec_input))
+            # Paper Eq. L1: sum the target and variational objectives for both
+            # modalities instead of training visual/audio in separate phases.
+            beta_kl_v = self.opt.methods.stage1_visual_beta_kl
+            beta_kl_a = self.opt.methods.stage1_audio_beta_kl
+            beta_rec_v = self.opt.methods.stage1_visual_beta_rec
+            beta_rec_a = self.opt.methods.stage1_audio_beta_rec
+            loss = (
+                beta_cls * (loss_v + loss_a)
+                + lamb * (
+                    beta_kl_v * loss_kl_v
+                    + beta_kl_a * loss_kl_a
+                    + 0.1 * beta_rec_v * loss_rec_input_v
+                    + 0.1 * beta_rec_a * loss_rec_input_a
+                )
+            )
 
         elif stage == 2:
             beta_rec_tr = self.opt.methods.stage2_beta_rec_tr
@@ -316,7 +322,7 @@ class DecompositionTrainer(BaseTrainer):
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
-        self.losses_total.update(float(loss))
+        self.losses_total.update(loss.detach().item(), labels.size(0))
 
         return loss
 
@@ -347,6 +353,10 @@ class DecompositionTrainer(BaseTrainer):
             print(f'Training Stage 3 (Joint Fine-tuning All Parameters) at epoch {epoch}')
 
         model.train()
+        if hasattr(m, 'configure_stage'):
+            # model.train() would otherwise put the frozen Stage-1 BatchNorm
+            # layers back into training mode during Stage 2.
+            m.configure_stage(stage_num)
 
         # Save originals
         orig_model = self.model
